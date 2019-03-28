@@ -1,15 +1,18 @@
 cmake_minimum_required(VERSION 2.8.3)
-project(bezier_planer)
+project(bezier_planner)
 
 add_subdirectory(${PROJECT_SOURCE_DIR}/third_party/sdf_tools)
 
-find_package(catkin REQUIRED COMPONENTS 
-    roscpp 
+list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake_modules/")
+
+find_package(catkin REQUIRED COMPONENTS
+    roscpp
     std_msgs
     nav_msgs
-    visualization_msgs 
+    visualization_msgs
     quadrotor_msgs
     tf
+    geometry_msgs
 )
 
 find_package(Eigen3 REQUIRED)
@@ -28,18 +31,18 @@ include_directories(${PROJECT_SOURCE_DIR}/third_party/mosek/include)
 include_directories(${PROJECT_SOURCE_DIR}/third_party/sdf_tools/include)
 
 include_directories(
-    include 
-    SYSTEM 
+    include
+    SYSTEM
     third_party
-    ${catkin_INCLUDE_DIRS} 
-    ${Eigen3_INCLUDE_DIRS} 
+    ${catkin_INCLUDE_DIRS}
+    ${Eigen3_INCLUDE_DIRS}
     ${PCL_INCLUDE_DIRS}
 )
 
 set(CMAKE_CXX_FLAGS "-std=c++0x ${CMAKE_CXX_FLAGS} -O3 -Wall") # -Wextra -Werror
 
 add_executable(
-    b_traj_node 
+    b_traj_node
     src/b_traj_node.cpp
     src/bezier_base.cpp
     src/trajectory_generator.cpp
@@ -63,5 +66,10 @@ target_link_libraries( random_forest_sensing
 
 add_executable ( odom_generator src/odom_generator.cpp )
 target_link_libraries( odom_generator
+                        ${catkin_LIBRARIES}
+)
+
+add_executable ( goal_filter src/goal_filter.cpp )
+target_link_libraries( goal_filter
                         ${catkin_LIBRARIES}
 )

@@ -7,6 +7,9 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/search/kdtree.h>
+#include <pcl_ros/point_cloud.h>
+#include <pcl_ros/transforms.h>
+#include <pcl/filters/extract_indices.h>
 
 #include <ros/ros.h>
 #include <ros/console.h>
@@ -20,6 +23,8 @@
 #include <tf/tf.h>
 #include <tf/transform_datatypes.h>
 #include <tf/transform_broadcaster.h>
+#include <tf/transform_listener.h>
+#include <tf2_sensor_msgs/tf2_sensor_msgs.h>
 
 #include "trajectory_generator.h"
 #include "bezier_base.h"
@@ -43,11 +48,12 @@ backward::SignalHandling sh;
 double _vis_traj_width;
 double _resolution, _inv_resolution;
 double _cloud_margin, _cube_margin, _check_horizon, _stop_horizon;
-double _x_size, _y_size, _z_size, _x_local_size, _y_local_size, _z_local_size;    
+double _x_size, _y_size, _z_size, _x_local_size, _y_local_size, _z_local_size;
 double _MAX_Vel, _MAX_Acc;
 bool   _is_use_fm, _is_proj_cube, _is_limit_vel, _is_limit_acc;
 int    _step_length, _max_inflate_iter, _traj_order;
 double _minimize_order;
+bool _enable_replanning;
 
 // useful global variables
 nav_msgs::Odometry _odom;
@@ -57,6 +63,9 @@ bool _has_target= false;
 bool _has_traj  = false;
 bool _is_emerg  = false;
 bool _is_init   = true;
+
+float xroof, yroof, zroof;
+pcl::PointXYZ roofpt;
 
 Vector3d _start_pt, _start_vel, _start_acc, _end_pt;
 double _init_x, _init_y, _init_z;
@@ -69,6 +78,9 @@ COLLISION_CELL _obst_cell(1.0);
 // ros related
 ros::Subscriber _map_sub, _pts_sub, _odom_sub;
 ros::Publisher _fm_path_vis_pub, _local_map_vis_pub, _inf_map_vis_pub, _corridor_vis_pub, _traj_vis_pub, _grid_path_vis_pub, _nodes_vis_pub, _traj_pub, _checkTraj_vis_pub, _stopTraj_vis_pub;
+// ros::Publisher _vis_map_pub;
+ros::Subscriber _poscmd_sub;
+quadrotor_msgs::PositionCommand _cmd;
 
 // trajectory related
 int _seg_num;
@@ -86,10 +98,15 @@ TrajectoryGenerator _trajectoryGenerator;
 CollisionMapGrid * collision_map       = new CollisionMapGrid();
 CollisionMapGrid * collision_map_local = new CollisionMapGrid();
 gridPathFinder * path_finder           = new gridPathFinder();
+tf::StampedTransform transf;
+
 
 void rcvWaypointsCallback(const nav_msgs::Path & wp);
 void rcvPointCloudCallBack(const sensor_msgs::PointCloud2 & pointcloud_map);
 void rcvOdometryCallbck(const nav_msgs::Odometry odom);
+void rcvPosCmdCallBack(const quadrotor_msgs::PositionCommand cmd); //bnr
+
+bool errorOdomPos();
 
 void trajPlanning();
 bool checkExecTraj();
@@ -116,60 +133,77 @@ VectorXd getStateFromBezier(const MatrixXd & polyCoeff, double t_now, int seg_no
 Vector3d getPosFromBezier(const MatrixXd & polyCoeff, double t_now, int seg_now );
 quadrotor_msgs::PolynomialTrajectory getBezierTraj();
 
+void rcvPosCmdCallBack(const quadrotor_msgs::PositionCommand cmd)
+{
+	_cmd    = cmd;
+}
+
 void rcvOdometryCallbck(const nav_msgs::Odometry odom)
 {
-    if (odom.header.frame_id != "uav") 
+    if (odom.header.frame_id != "world")
         return ;
-    
+
     _odom = odom;
     _has_odom = true;
 
     _start_pt(0)  = _odom.pose.pose.position.x;
     _start_pt(1)  = _odom.pose.pose.position.y;
-    _start_pt(2)  = _odom.pose.pose.position.z;    
+    // _start_pt(2)  = _odom.pose.pose.position.z;
+    _start_pt(2) = 0.75;
 
     _start_vel(0) = _odom.twist.twist.linear.x;
     _start_vel(1) = _odom.twist.twist.linear.y;
-    _start_vel(2) = _odom.twist.twist.linear.z;    
+    _start_vel(2) = _odom.twist.twist.linear.z;
+
+    // tf::Quaternion q(_odom.pose.pose.orientation.x,_odom.pose.pose.orientation.y,_odom.pose.pose.orientation.z,_odom.pose.pose.orientation.w);
+    // double roll, pitch, yaw;
+    // tf::Matrix3x3(q).getRPY(roll, pitch, yaw);
+    // _start_vel(0) = cos(yaw);
+    // _start_vel(1) = sin(yaw);
+    // _start_vel(2) = 0;
+    // ROS_INFO("heading %f",yaw);
 
     _start_acc(0) = _odom.twist.twist.angular.x;
     _start_acc(1) = _odom.twist.twist.angular.y;
-    _start_acc(2) = _odom.twist.twist.angular.z;    
+    _start_acc(2) = _odom.twist.twist.angular.z;
 
     if( std::isnan(_odom.pose.pose.position.x) || std::isnan(_odom.pose.pose.position.y) || std::isnan(_odom.pose.pose.position.z))
         return;
-    
-    static tf::TransformBroadcaster br;
-    tf::Transform transform;
-    transform.setOrigin( tf::Vector3(_odom.pose.pose.position.x, _odom.pose.pose.position.y, _odom.pose.pose.position.z) );
-    transform.setRotation(tf::Quaternion(0, 0, 0, 1.0));
-    br.sendTransform(tf::StampedTransform(transform, ros::Time::now(), "world", "quadrotor"));
+
+//     static tf::TransformBroadcaster br;
+//     tf::Transform transform;
+//     transform.setOrigin( tf::Vector3(_odom.pose.pose.position.x, _odom.pose.pose.position.y, _odom.pose.pose.position.z) );
+//     transform.setRotation(tf::Quaternion(0, 0, 0, 1.0));
+//     br.sendTransform(tf::StampedTransform(transform, ros::Time::now(), "world", "quadrotor"));
 }
 
 void rcvWaypointsCallback(const nav_msgs::Path & wp)
-{     
-    if(wp.poses[0].pose.position.z < 0.0)
+{
+    if(wp.poses[0].pose.position.z < 0.0) // NEED TO REPLACE WITH CONSIDERATION FOR NONFLAT GROUND
         return;
 
     _is_init = false;
-    _end_pt << wp.poses[0].pose.position.x,
-               wp.poses[0].pose.position.y,
-               wp.poses[0].pose.position.z;
+    _end_pt(0) = wp.poses[0].pose.position.x;
+    _end_pt(1) = wp.poses[0].pose.position.y;
+    // _end_pt(2) = wp.poses[0].pose.position.z;
+    _end_pt(2) = 0.5;
 
     _has_target = true;
     _is_emerg   = true;
 
-    ROS_INFO("[Fast Marching Node] receive the way-points");
+    ROS_INFO("[Fast Marching Node] receive the way-points %f, %f, %f", _end_pt[0], _end_pt[1], _end_pt[2]);
 
-    trajPlanning(); 
+    trajPlanning();
 }
 
 Vector3d _local_origin;
 void rcvPointCloudCallBack(const sensor_msgs::PointCloud2 & pointcloud_map)
-{   
+{
+
     pcl::PointCloud<pcl::PointXYZ> cloud;
+//    pcl::fromROSMsg(pcl_tf, cloud);
     pcl::fromROSMsg(pointcloud_map, cloud);
-    
+
     if((int)cloud.points.size() == 0)
         return;
 
@@ -177,7 +211,7 @@ void rcvPointCloudCallBack(const sensor_msgs::PointCloud2 & pointcloud_map)
 
     ros::Time time_1 = ros::Time::now();
     collision_map->RestMap();
-    
+
     double local_c_x = (int)((_start_pt(0) - _x_local_size/2.0)  * _inv_resolution + 0.5) * _resolution;
     double local_c_y = (int)((_start_pt(1) - _y_local_size/2.0)  * _inv_resolution + 0.5) * _resolution;
     double local_c_z = (int)((_start_pt(2) - _z_local_size/2.0)  * _inv_resolution + 0.5) * _resolution;
@@ -185,10 +219,10 @@ void rcvPointCloudCallBack(const sensor_msgs::PointCloud2 & pointcloud_map)
     _local_origin << local_c_x, local_c_y, local_c_z;
 
     Translation3d origin_local_translation( _local_origin(0), _local_origin(1), _local_origin(2));
-    Quaterniond origin_local_rotation(1.0, 0.0, 0.0, 0.0);
+    Quaterniond origin_local_rotation(1, 0.0, 0.0, 0.0);
 
     Affine3d origin_local_transform = origin_local_translation * origin_local_rotation;
-    
+
     double _buffer_size = 2 * _MAX_Vel;
     double _x_buffer_size = _x_local_size + _buffer_size;
     double _y_buffer_size = _y_local_size + _buffer_size;
@@ -196,22 +230,81 @@ void rcvPointCloudCallBack(const sensor_msgs::PointCloud2 & pointcloud_map)
 
     collision_map_local = new CollisionMapGrid(origin_local_transform, "world", _resolution, _x_buffer_size, _y_buffer_size, _z_buffer_size, _free_cell);
 
+    /* Fake ceiling for planning ground robot */
     vector<pcl::PointXYZ> inflatePts(20);
     pcl::PointCloud<pcl::PointXYZ> cloud_inflation;
     pcl::PointCloud<pcl::PointXYZ> cloud_local;
+    unsigned int xroofrng = 5;
+    unsigned int yroofrng = 5;
+    zroof = 1.1;
+    for (xroof = _start_pt(0)-xroofrng;xroof <= _start_pt(0)+xroofrng;xroof +=0.1)
+    {
+    	for (yroof = _start_pt(1)-yroofrng;yroof <= _start_pt(1)+yroofrng;yroof +=0.1)
+    	{
+      	roofpt.x = xroof;
+      	roofpt.y = yroof;
+      	roofpt.z = zroof;
+      	cloud.push_back(roofpt);
+  	  }
+    }
+
+
+/*
+    float xwall, ywall, zwall;
+    pcl::PointXYZ wallpt;
+    // left wall
+    for (zwall = 0;zwall <= 2;zwall +=0.1)
+    {
+	for (xwall = -3.3;xwall <= 0;xwall +=0.1)
+	{
+	ywall = -3.5;
+	wallpt.x = xwall;
+	wallpt.y = ywall;
+	wallpt.z = zwall;
+	cloud.push_back(wallpt);
+	}
+    }
+
+    // right wall
+    for (zwall = 0;zwall <= 2;zwall +=0.1)
+    {
+	for (xwall = -3.3;xwall <= 0;xwall +=0.1)
+	{
+	ywall = 3.3;
+	wallpt.x = xwall;
+	wallpt.y = ywall;
+	wallpt.z = zwall;
+	cloud.push_back(wallpt);
+	}
+    }
+
+
+    // back wall
+    for (zwall = 0;zwall <= 2;zwall +=0.1)
+    {
+	for (ywall = -3.5;ywall <= 3.3;ywall +=0.1)
+	{
+	xwall = -3.3;
+	wallpt.x = xwall;
+	wallpt.y = ywall;
+	wallpt.z = zwall;
+	cloud.push_back(wallpt);
+	}
+    }
+*/
 
     for (int idx = 0; idx < (int)cloud.points.size(); idx++)
-    {   
+    {
         auto mk = cloud.points[idx];
         pcl::PointXYZ pt(mk.x, mk.y, mk.z);
 
         if( fabs(pt.x - _start_pt(0)) > _x_local_size / 2.0 || fabs(pt.y - _start_pt(1)) > _y_local_size / 2.0 || fabs(pt.z - _start_pt(2)) > _z_local_size / 2.0 )
-            continue; 
-        
+            continue;
+
         cloud_local.push_back(pt);
         inflatePts = pointInflate(pt);
         for(int i = 0; i < (int)inflatePts.size(); i++)
-        {   
+        {
             pcl::PointXYZ inf_pt = inflatePts[i];
             Vector3d addPt(inf_pt.x, inf_pt.y, inf_pt.z);
             collision_map_local->Set3d(addPt, _obst_cell);
@@ -232,7 +325,7 @@ void rcvPointCloudCallBack(const sensor_msgs::PointCloud2 & pointcloud_map)
     cloud_local.header.frame_id = "world";
 
     sensor_msgs::PointCloud2 inflateMap, localMap;
-    
+
     pcl::toROSMsg(cloud_inflation, inflateMap);
     pcl::toROSMsg(cloud_local, localMap);
     _inf_map_vis_pub.publish(inflateMap);
@@ -241,8 +334,45 @@ void rcvPointCloudCallBack(const sensor_msgs::PointCloud2 & pointcloud_map)
     ros::Time time_3 = ros::Time::now();
     //ROS_WARN("Time in receving the map is %f", (time_3 - time_1).toSec());
 
-    if( checkExecTraj() == true )
-        trajPlanning(); 
+    if( _enable_replanning )
+    {
+      if( checkExecTraj() || errorOdomPos() )
+      {
+          trajPlanning();
+          ROS_INFO("Replanning");
+      }
+    }
+    else
+    {
+      if( checkExecTraj() )
+          trajPlanning();
+    }
+
+}
+
+bool errorOdomPos()
+{
+    float errorxlim = 0.5;
+    float errorylim = errorxlim;
+ //   float errorzlim = errorxlim;
+ //   ROS_INFO("poscmd subs = %f, %f, %f", _cmd.position.x, _cmd.position.y, _cmd.position.z);
+ //   ROS_INFO("odom subs = %f, %f, %f", _start_pt(0), _start_pt(1), _start_pt(2));
+ //   ROS_INFO("diff = %f, %f, %f", abs(_start_pt(0)-_cmd.position.x),abs(_start_pt(1)-_cmd.position.y),abs(_start_pt(2)-_cmd.position.z));
+		ROS_INFO("odom: %.2f, %.2f, %.2f",_odom.pose.pose.position.x,_odom.pose.pose.position.y,_odom.pose.pose.position.z);
+		ROS_INFO("cmd: %.2f, %.2f, %.2f",_cmd.position.x,_cmd.position.y,_cmd.position.z);
+		ROS_INFO("diff: %.2f, %.2f, %.2f",
+			abs(_odom.pose.pose.position.x - _cmd.position.x),
+			abs(_odom.pose.pose.position.y - _cmd.position.y),
+			abs(_odom.pose.pose.position.z - _cmd.position.z));
+		// if ((abs(_start_pt(0) - _cmd.position.x) >=errorxlim) || (abs(_start_pt(1) - _cmd.position.y) >=errorylim)) || (abs(_start_pt(2) - _cmd.position.z) >=errorzlim)
+    // if ( (abs(_start_pt(0) - _cmd.position.x) >=errorxlim) || (abs(_start_pt(1) - _cmd.position.y) >=errorylim))
+		if ( (abs(_odom.pose.pose.position.x - _cmd.position.x) >=errorxlim) || (abs(_odom.pose.pose.position.y - _cmd.position.y) >=errorylim))
+		{
+    	ROS_INFO("Error large");
+    	return true;
+    }
+
+    return false;
 }
 
 vector<pcl::PointXYZ> pointInflate( pcl::PointXYZ pt)
@@ -267,8 +397,8 @@ vector<pcl::PointXYZ> pointInflate( pcl::PointXYZ pt)
 }
 
 bool checkExecTraj()
-{   
-    if( _has_traj == false ) 
+{
+    if( _has_traj == false )
         return false;
 
     Vector3d traj_pt;
@@ -278,7 +408,7 @@ bool checkExecTraj()
     geometry_msgs::Point pt;
     _stop_traj_vis.header.stamp    = _check_traj_vis.header.stamp    = ros::Time::now();
     _stop_traj_vis.header.frame_id = _check_traj_vis.header.frame_id = "world";
-    
+
     _check_traj_vis.ns = "trajectory/check_trajectory";
     _stop_traj_vis.ns  = "trajectory/stop_trajectory";
 
@@ -311,13 +441,13 @@ bool checkExecTraj()
     _check_traj_vis.color.b = 1.0;
     _check_traj_vis.color.a = 1.0;
 
-    double t_s = max(0.0, (_odom.header.stamp - _start_time).toSec());      
+    double t_s = max(0.0, (_odom.header.stamp - _start_time).toSec());
     int idx;
     for (idx = 0; idx < _seg_num; ++idx)
     {
         if( t_s  > _seg_time(idx) && idx + 1 < _seg_num)
             t_s -= _seg_time(idx);
-        else 
+        else
             break;
     }
 
@@ -331,27 +461,27 @@ bool checkExecTraj()
             double t_d = duration + t - t_ss;
             if( t_d > _check_horizon ) break;
             traj_pt = getPosFromBezier( _bezier_coeff, t/_seg_time(i), i );
-            pt.x = traj_pt(0) = _seg_time(i) * traj_pt(0); 
+            pt.x = traj_pt(0) = _seg_time(i) * traj_pt(0);
             pt.y = traj_pt(1) = _seg_time(i) * traj_pt(1);
             pt.z = traj_pt(2) = _seg_time(i) * traj_pt(2);
 
             _check_traj_vis.points.push_back(pt);
 
-            if( t_d <= _stop_horizon ) 
+            if( t_d <= _stop_horizon )
                 _stop_traj_vis.points.push_back(pt);
 
             if( checkCoordObs(traj_pt))
-            {   
+            {
                 ROS_WARN("predicted collision time is %f ahead", t_d);
-                
-                if( t_d <= _stop_horizon ) 
-                {   
+
+                if( t_d <= _stop_horizon )
+                {
                     ROS_ERROR("emergency occurs in time is %f ahead", t_d);
                     _is_emerg = true;
                 }
 
                 _checkTraj_vis_pub.publish(_check_traj_vis);
-                _stopTraj_vis_pub.publish(_stop_traj_vis); 
+                _stopTraj_vis_pub.publish(_stop_traj_vis);
 
                 return true;
             }
@@ -359,14 +489,14 @@ bool checkExecTraj()
         duration += _seg_time(i) - t_ss;
     }
 
-    _checkTraj_vis_pub.publish(_check_traj_vis); 
-    _stopTraj_vis_pub.publish(_stop_traj_vis); 
+    _checkTraj_vis_pub.publish(_check_traj_vis);
+    _stopTraj_vis_pub.publish(_stop_traj_vis);
 
     return false;
 }
 
 bool checkCoordObs(Vector3d checkPt)
-{       
+{
     if(collision_map->Get(checkPt(0), checkPt(1), checkPt(2)).first.occupancy > 0.0 )
         return true;
 
@@ -374,13 +504,13 @@ bool checkCoordObs(Vector3d checkPt)
 }
 
 pair<Cube, bool> inflateCube(Cube cube, Cube lstcube)
-{   
+{
     Cube cubeMax = cube;
 
-    // Inflate sequence: left, right, front, back, below, above                                                                                
+    // Inflate sequence: left, right, front, back, below, above
     MatrixXi vertex_idx(8, 3);
     for (int i = 0; i < 8; i++)
-    { 
+    {
         double coord_x = max(min(cube.vertex(i, 0), _pt_max_x), _pt_min_x);
         double coord_y = max(min(cube.vertex(i, 1), _pt_max_y), _pt_min_y);
         double coord_z = max(min(cube.vertex(i, 2), _pt_max_z), _pt_min_z);
@@ -389,28 +519,28 @@ pair<Cube, bool> inflateCube(Cube cube, Cube lstcube)
         Vector3i pt_idx = collision_map->LocationToGridIndex(coord);
 
         if( collision_map->Get( (int64_t)pt_idx(0), (int64_t)pt_idx(1), (int64_t)pt_idx(2) ).first.occupancy > 0.5 )
-        {       
+        {
             cout<<"path point: \n"<<coord<<endl;
             ROS_ERROR("[Planning Node] path has node in obstacles !");
             //ROS_BREAK();
             return make_pair(cubeMax, false);
         }
-        
+
         vertex_idx.row(i) = pt_idx;
     }
 
     int id_x, id_y, id_z;
 
     /*
-               P4------------P3 
+               P4------------P3
                /|           /|              ^
               / |          / |              | z
             P1--|---------P2 |              |
              |  P8--------|--p7             |
              | /          | /               /--------> y
-             |/           |/               /  
+             |/           |/               /
             P5------------P6              / x
-    */           
+    */
 
     // Y- now is the left side : (p1 -- p4 -- p8 -- p5) face sweep
     // ############################################################################################################
@@ -420,26 +550,26 @@ pair<Cube, bool> inflateCube(Cube cube, Cube lstcube)
 
     int iter = 0;
     while(iter < _max_inflate_iter)
-    {   
-        collide  = false; 
+    {
+        collide  = false;
         int y_lo = max(0, vertex_idx(0, 1) - _step_length);
         int y_up = min(_max_y_id, vertex_idx(1, 1) + _step_length);
 
         for(id_y = vertex_idx(0, 1); id_y >= y_lo; id_y-- )
-        {   
-            if( collide == true) 
+        {
+            if( collide == true)
                 break;
-            
+
             for(id_x = vertex_idx(0, 0); id_x >= vertex_idx(3, 0); id_x-- )
-            {    
-                if( collide == true) 
+            {
+                if( collide == true)
                     break;
 
                 for(id_z = vertex_idx(0, 2); id_z >= vertex_idx(4, 2); id_z-- )
                 {
-                    double occupy = collision_map->Get( (int64_t)id_x, (int64_t)id_y, (int64_t)id_z).first.occupancy;    
+                    double occupy = collision_map->Get( (int64_t)id_x, (int64_t)id_y, (int64_t)id_z).first.occupancy;
                     if(occupy > 0.5) // the voxel is occupied
-                    {   
+                    {
                         collide = true;
                         break;
                     }
@@ -456,25 +586,25 @@ pair<Cube, bool> inflateCube(Cube cube, Cube lstcube)
         }
         else
             vertex_idx(0, 1) = vertex_idx(3, 1) = vertex_idx(7, 1) = vertex_idx(4, 1) = id_y + 1;
-        
+
         // Y+ now is the right side : (p2 -- p3 -- p7 -- p6) face
         // ############################################################################################################
         collide = false;
         for(id_y = vertex_idx(1, 1); id_y <= y_up; id_y++ )
-        {   
-            if( collide == true) 
+        {
+            if( collide == true)
                 break;
-            
+
             for(id_x = vertex_idx(1, 0); id_x >= vertex_idx(2, 0); id_x-- )
             {
-                if( collide == true) 
+                if( collide == true)
                     break;
 
                 for(id_z = vertex_idx(1, 2); id_z >= vertex_idx(5, 2); id_z-- )
                 {
-                    double occupy = collision_map->Get( (int64_t)id_x, (int64_t)id_y, (int64_t)id_z).first.occupancy;    
+                    double occupy = collision_map->Get( (int64_t)id_x, (int64_t)id_y, (int64_t)id_z).first.occupancy;
                     if(occupy > 0.5) // the voxel is occupied
-                    {   
+                    {
                         collide = true;
                         break;
                     }
@@ -499,20 +629,20 @@ pair<Cube, bool> inflateCube(Cube cube, Cube lstcube)
 
         collide = false;
         for(id_x = vertex_idx(0, 0); id_x <= x_up; id_x++ )
-        {   
-            if( collide == true) 
+        {
+            if( collide == true)
                 break;
-            
+
             for(id_y = vertex_idx(0, 1); id_y <= vertex_idx(1, 1); id_y++ )
             {
-                if( collide == true) 
+                if( collide == true)
                     break;
 
                 for(id_z = vertex_idx(0, 2); id_z >= vertex_idx(4, 2); id_z-- )
                 {
-                    double occupy = collision_map->Get( (int64_t)id_x, (int64_t)id_y, (int64_t)id_z).first.occupancy;    
+                    double occupy = collision_map->Get( (int64_t)id_x, (int64_t)id_y, (int64_t)id_z).first.occupancy;
                     if(occupy > 0.5) // the voxel is occupied
-                    {   
+                    {
                         collide = true;
                         break;
                     }
@@ -522,32 +652,32 @@ pair<Cube, bool> inflateCube(Cube cube, Cube lstcube)
 
         if(collide)
         {
-            vertex_idx(0, 0) = max(id_x-2, vertex_idx(0, 0)); 
-            vertex_idx(1, 0) = max(id_x-2, vertex_idx(1, 0)); 
-            vertex_idx(5, 0) = max(id_x-2, vertex_idx(5, 0)); 
-            vertex_idx(4, 0) = max(id_x-2, vertex_idx(4, 0)); 
+            vertex_idx(0, 0) = max(id_x-2, vertex_idx(0, 0));
+            vertex_idx(1, 0) = max(id_x-2, vertex_idx(1, 0));
+            vertex_idx(5, 0) = max(id_x-2, vertex_idx(5, 0));
+            vertex_idx(4, 0) = max(id_x-2, vertex_idx(4, 0));
         }
         else
-            vertex_idx(0, 0) = vertex_idx(1, 0) = vertex_idx(5, 0) = vertex_idx(4, 0) = id_x - 1;    
+            vertex_idx(0, 0) = vertex_idx(1, 0) = vertex_idx(5, 0) = vertex_idx(4, 0) = id_x - 1;
 
         // X- now is the back side : (p4 -- p3 -- p7 -- p8) face
         // ############################################################################################################
         collide = false;
         for(id_x = vertex_idx(3, 0); id_x >= x_lo; id_x-- )
-        {   
-            if( collide == true) 
+        {
+            if( collide == true)
                 break;
-            
+
             for(id_y = vertex_idx(3, 1); id_y <= vertex_idx(2, 1); id_y++ )
             {
-                if( collide == true) 
+                if( collide == true)
                     break;
 
                 for(id_z = vertex_idx(3, 2); id_z >= vertex_idx(7, 2); id_z-- )
                 {
-                    double occupy = collision_map->Get( (int64_t)id_x, (int64_t)id_y, (int64_t)id_z).first.occupancy;    
+                    double occupy = collision_map->Get( (int64_t)id_x, (int64_t)id_y, (int64_t)id_z).first.occupancy;
                     if(occupy > 0.5) // the voxel is occupied
-                    {   
+                    {
                         collide = true;
                         break;
                     }
@@ -557,10 +687,10 @@ pair<Cube, bool> inflateCube(Cube cube, Cube lstcube)
 
         if(collide)
         {
-            vertex_idx(3, 0) = min(id_x+2, vertex_idx(3, 0)); 
-            vertex_idx(2, 0) = min(id_x+2, vertex_idx(2, 0)); 
-            vertex_idx(6, 0) = min(id_x+2, vertex_idx(6, 0)); 
-            vertex_idx(7, 0) = min(id_x+2, vertex_idx(7, 0)); 
+            vertex_idx(3, 0) = min(id_x+2, vertex_idx(3, 0));
+            vertex_idx(2, 0) = min(id_x+2, vertex_idx(2, 0));
+            vertex_idx(6, 0) = min(id_x+2, vertex_idx(6, 0));
+            vertex_idx(7, 0) = min(id_x+2, vertex_idx(7, 0));
         }
         else
             vertex_idx(3, 0) = vertex_idx(2, 0) = vertex_idx(6, 0) = vertex_idx(7, 0) = id_x + 1;
@@ -571,20 +701,20 @@ pair<Cube, bool> inflateCube(Cube cube, Cube lstcube)
         int z_lo = max(0, vertex_idx(4, 2) - _step_length);
         int z_up = min(_max_z_id, vertex_idx(0, 2) + _step_length);
         for(id_z = vertex_idx(0, 2); id_z <= z_up; id_z++ )
-        {   
-            if( collide == true) 
+        {
+            if( collide == true)
                 break;
-            
+
             for(id_y = vertex_idx(0, 1); id_y <= vertex_idx(1, 1); id_y++ )
             {
-                if( collide == true) 
+                if( collide == true)
                     break;
 
                 for(id_x = vertex_idx(0, 0); id_x >= vertex_idx(3, 0); id_x-- )
                 {
-                    double occupy = collision_map->Get( (int64_t)id_x, (int64_t)id_y, (int64_t)id_z).first.occupancy;    
+                    double occupy = collision_map->Get( (int64_t)id_x, (int64_t)id_y, (int64_t)id_z).first.occupancy;
                     if(occupy > 0.5) // the voxel is occupied
-                    {   
+                    {
                         collide = true;
                         break;
                     }
@@ -605,20 +735,20 @@ pair<Cube, bool> inflateCube(Cube cube, Cube lstcube)
         // ############################################################################################################
         collide = false;
         for(id_z = vertex_idx(4, 2); id_z >= z_lo; id_z-- )
-        {   
-            if( collide == true) 
+        {
+            if( collide == true)
                 break;
-            
+
             for(id_y = vertex_idx(4, 1); id_y <= vertex_idx(5, 1); id_y++ )
             {
-                if( collide == true) 
+                if( collide == true)
                     break;
 
                 for(id_x = vertex_idx(4, 0); id_x >= vertex_idx(7, 0); id_x-- )
                 {
-                    double occupy = collision_map->Get( (int64_t)id_x, (int64_t)id_y, (int64_t)id_z).first.occupancy;    
+                    double occupy = collision_map->Get( (int64_t)id_x, (int64_t)id_y, (int64_t)id_z).first.occupancy;
                     if(occupy > 0.5) // the voxel is occupied
-                    {   
+                    {
                         collide = true;
                         break;
                     }
@@ -643,7 +773,7 @@ pair<Cube, bool> inflateCube(Cube cube, Cube lstcube)
 
         MatrixXd vertex_coord(8, 3);
         for(int i = 0; i < 8; i++)
-        {   
+        {
             int index_x = max(min(vertex_idx(i, 0), _max_x_id - 1), 0);
             int index_y = max(min(vertex_idx(i, 1), _max_y_id - 1), 0);
             int index_z = max(min(vertex_idx(i, 2), _max_z_id - 1), 0);
@@ -654,7 +784,7 @@ pair<Cube, bool> inflateCube(Cube cube, Cube lstcube)
         }
 
         cubeMax.setVertex(vertex_coord, _resolution);
-        if( isContains(lstcube, cubeMax))        
+        if( isContains(lstcube, cubeMax))
             return make_pair(lstcube, false);
 
         iter ++;
@@ -663,70 +793,70 @@ pair<Cube, bool> inflateCube(Cube cube, Cube lstcube)
     return make_pair(cubeMax, true);
 }
 
-Cube generateCube( Vector3d pt) 
-{   
+Cube generateCube( Vector3d pt)
+{
 /*
-           P4------------P3 
+           P4------------P3
            /|           /|              ^
           / |          / |              | z
         P1--|---------P2 |              |
          |  P8--------|--p7             |
          | /          | /               /--------> y
-         |/           |/               /  
+         |/           |/               /
         P5------------P6              / x
-*/       
+*/
     Cube cube;
-    
+
     pt(0) = max(min(pt(0), _pt_max_x), _pt_min_x);
     pt(1) = max(min(pt(1), _pt_max_y), _pt_min_y);
     pt(2) = max(min(pt(2), _pt_max_z), _pt_min_z);
 
-    Vector3i pc_index = collision_map->LocationToGridIndex(pt);    
+    Vector3i pc_index = collision_map->LocationToGridIndex(pt);
     Vector3d pc_coord = collision_map->GridIndexToLocation(pc_index);
 
     cube.center = pc_coord;
     double x_u = pc_coord(0);
     double x_l = pc_coord(0);
-    
+
     double y_u = pc_coord(1);
     double y_l = pc_coord(1);
-    
+
     double z_u = pc_coord(2);
     double z_l = pc_coord(2);
 
-    cube.vertex.row(0) = Vector3d(x_u, y_l, z_u);  
-    cube.vertex.row(1) = Vector3d(x_u, y_u, z_u);  
-    cube.vertex.row(2) = Vector3d(x_l, y_u, z_u);  
-    cube.vertex.row(3) = Vector3d(x_l, y_l, z_u);  
+    cube.vertex.row(0) = Vector3d(x_u, y_l, z_u);
+    cube.vertex.row(1) = Vector3d(x_u, y_u, z_u);
+    cube.vertex.row(2) = Vector3d(x_l, y_u, z_u);
+    cube.vertex.row(3) = Vector3d(x_l, y_l, z_u);
 
-    cube.vertex.row(4) = Vector3d(x_u, y_l, z_l);  
-    cube.vertex.row(5) = Vector3d(x_u, y_u, z_l);  
-    cube.vertex.row(6) = Vector3d(x_l, y_u, z_l);  
-    cube.vertex.row(7) = Vector3d(x_l, y_l, z_l);  
+    cube.vertex.row(4) = Vector3d(x_u, y_l, z_l);
+    cube.vertex.row(5) = Vector3d(x_u, y_u, z_l);
+    cube.vertex.row(6) = Vector3d(x_l, y_u, z_l);
+    cube.vertex.row(7) = Vector3d(x_l, y_l, z_l);
 
     return cube;
 }
 
 bool isContains(Cube cube1, Cube cube2)
-{   
+{
     if( cube1.vertex(0, 0) >= cube2.vertex(0, 0) && cube1.vertex(0, 1) <= cube2.vertex(0, 1) && cube1.vertex(0, 2) >= cube2.vertex(0, 2) &&
         cube1.vertex(6, 0) <= cube2.vertex(6, 0) && cube1.vertex(6, 1) >= cube2.vertex(6, 1) && cube1.vertex(6, 2) <= cube2.vertex(6, 2)  )
         return true;
     else
-        return false; 
+        return false;
 }
 
 void corridorSimplify(vector<Cube> & cubicList)
 {
     vector<Cube> cubicSimplifyList;
     for(int j = (int)cubicList.size() - 1; j >= 0; j--)
-    {   
+    {
         for(int k = j - 1; k >= 0; k--)
-        {   
+        {
             if(cubicList[k].valid == false)
                 continue;
             else if(isContains(cubicList[j], cubicList[k]))
-                cubicList[k].valid = false;   
+                cubicList[k].valid = false;
         }
     }
 
@@ -738,7 +868,7 @@ void corridorSimplify(vector<Cube> & cubicList)
 }
 
 vector<Cube> corridorGeneration(vector<Vector3d> path_coord, vector<double> time)
-{   
+{
     vector<Cube> cubeList;
     Vector3d pt;
 
@@ -755,7 +885,7 @@ vector<Cube> corridorGeneration(vector<Vector3d> path_coord, vector<double> time
             continue;
 
         cube = result.first;
-        
+
         lstcube = cube;
         cube.t = time[i];
         cubeList.push_back(cube);
@@ -764,7 +894,7 @@ vector<Cube> corridorGeneration(vector<Vector3d> path_coord, vector<double> time
 }
 
 vector<Cube> corridorGeneration(vector<Vector3d> path_coord)
-{   
+{
     vector<Cube> cubeList;
     Vector3d pt;
 
@@ -781,7 +911,7 @@ vector<Cube> corridorGeneration(vector<Vector3d> path_coord)
             continue;
 
         cube = result.first;
-        
+
         lstcube = cube;
         cubeList.push_back(cube);
     }
@@ -789,7 +919,7 @@ vector<Cube> corridorGeneration(vector<Vector3d> path_coord)
 }
 
 double velMapping(double d, double max_v)
-{   
+{
     double vel;
 
     if( d <= 0.25)
@@ -797,7 +927,7 @@ double velMapping(double d, double max_v)
     else if(d > 0.25 && d <= 0.75)
         vel = 1.5 * d - 0.25;
     else if(d > 0.75 && d <= 1.0)
-        vel = - 2.0 * (d - 1.0) * (d - 1.0) + 1;  
+        vel = - 2.0 * (d - 1.0) * (d - 1.0) + 1;
     else
         vel = 1.0;
 
@@ -805,8 +935,10 @@ double velMapping(double d, double max_v)
 }
 
 void trajPlanning()
-{   
-    if( _has_target == false || _has_map == false || _has_odom == false) 
+{
+   ROS_INFO("%d, %d, %d",_has_target, _has_map, _has_odom);
+
+    	if( _has_target == false || _has_map == false || _has_odom == false)
         return;
 
     vector<Cube> corridor;
@@ -819,8 +951,8 @@ void trajPlanning()
         ROS_WARN("time in generate EDT is %f", (time_2 - time_1).toSec());
 
         unsigned int idx;
-        double max_vel = _MAX_Vel * 0.75; 
-        vector<unsigned int> obs;            
+        double max_vel = _MAX_Vel * 0.75;
+        vector<unsigned int> obs;
         Vector3d pt;
         vector<int64_t> pt_idx;
         double flow_vel;
@@ -839,8 +971,8 @@ void trajPlanning()
                 for(unsigned int i = 0; i < size_x; i++)
                 {
                     idx = k * size_y * size_x + j * size_x + i;
-                    pt << (i + 0.5) * _resolution + _map_origin(0), 
-                          (j + 0.5) * _resolution + _map_origin(1), 
+                    pt << (i + 0.5) * _resolution + _map_origin(0),
+                          (j + 0.5) * _resolution + _map_origin(1),
                           (k + 0.5) * _resolution + _map_origin(2);
 
                     Vector3i index = collision_map_local->LocationToGridIndex(pt);
@@ -852,7 +984,7 @@ void trajPlanning()
                     }
                     else
                         flow_vel = max_vel;
-    
+
                     if( k == 0 || k == (size_z - 1) || j == 0 || j == (size_y - 1) || i == 0 || i == (size_x - 1) )
                         flow_vel = 0.0;
 
@@ -862,28 +994,28 @@ void trajPlanning()
                 }
             }
         }
-        
+
         grid_fmm.setOccupiedCells(std::move(obs));
         grid_fmm.setLeafSize(_resolution);
 
-        Vector3d startIdx3d = (_start_pt - _map_origin) * _inv_resolution; 
+        Vector3d startIdx3d = (_start_pt - _map_origin) * _inv_resolution;
         Vector3d endIdx3d   = (_end_pt   - _map_origin) * _inv_resolution;
 
         Coord3D goal_point = {(unsigned int)startIdx3d[0], (unsigned int)startIdx3d[1], (unsigned int)startIdx3d[2]};
-        Coord3D init_point = {(unsigned int)endIdx3d[0],   (unsigned int)endIdx3d[1],   (unsigned int)endIdx3d[2]}; 
+        Coord3D init_point = {(unsigned int)endIdx3d[0],   (unsigned int)endIdx3d[1],   (unsigned int)endIdx3d[2]};
 
         unsigned int startIdx;
         vector<unsigned int> startIndices;
         grid_fmm.coord2idx(init_point, startIdx);
-        
+
         startIndices.push_back(startIdx);
-        
+
         unsigned int goalIdx;
         grid_fmm.coord2idx(goal_point, goalIdx);
-        grid_fmm[goalIdx].setOccupancy(max_vel);     
+        grid_fmm[goalIdx].setOccupancy(max_vel);
 
         Solver<FMGrid3D>* fm_solver = new FMMStar<FMGrid3D>("FMM*_Dist", TIME); // LSM, FMM
-    
+
         fm_solver->setEnvironment(&grid_fmm);
         fm_solver->setInitialAndGoalPoints(startIndices, goalIdx);
 
@@ -913,7 +1045,7 @@ void trajPlanning()
                 _traj.action = quadrotor_msgs::PolynomialTrajectory::ACTION_WARN_IMPOSSIBLE;
                 _traj_pub.publish(_traj);
                 _has_traj = false;
-            } 
+            }
             return;
         }
 
@@ -932,7 +1064,7 @@ void trajPlanning()
         }
         visPath(path_coord);
 
-        ros::Time time_bef_corridor = ros::Time::now();    
+        ros::Time time_bef_corridor = ros::Time::now();
         sortPath(path_coord, time);
         corridor = corridorGeneration(path_coord, time);
         ros::Time time_aft_corridor = ros::Time::now();
@@ -944,17 +1076,17 @@ void trajPlanning()
         delete fm_solver;
     }
     else
-    {   
+    {
         path_finder->linkLocalMap(collision_map_local, _local_origin);
         path_finder->AstarSearch(_start_pt, _end_pt);
         vector<Vector3d> gridPath = path_finder->getPath();
         vector<GridNodePtr> searchedNodes = path_finder->getVisitedNodes();
         path_finder->resetLocalMap();
-        
+
         visGridPath(gridPath);
         visExpNode(searchedNodes);
 
-        ros::Time time_bef_corridor = ros::Time::now();    
+        ros::Time time_bef_corridor = ros::Time::now();
         corridor = corridorGeneration(gridPath);
         ros::Time time_aft_corridor = ros::Time::now();
         ROS_WARN("Time consume in corridor generation is %f", (time_aft_corridor - time_bef_corridor).toSec());
@@ -968,28 +1100,28 @@ void trajPlanning()
     MatrixXd acc = MatrixXd::Zero(2,3);
 
     pos.row(0) = _start_pt;
-    pos.row(1) = _end_pt;    
+    pos.row(1) = _end_pt;
     vel.row(0) = _start_vel;
     acc.row(0) = _start_acc;
-    
+
     double obj;
     ros::Time time_bef_opt = ros::Time::now();
 
     if(_trajectoryGenerator.BezierPloyCoeffGeneration
-        ( corridor, _MQM, pos, vel, acc, _MAX_Vel, _MAX_Acc, _traj_order, _minimize_order, 
+        ( corridor, _MQM, pos, vel, acc, _MAX_Vel, _MAX_Acc, _traj_order, _minimize_order,
          _cube_margin, _is_limit_vel, _is_limit_acc, obj, _bezier_coeff ) == -1 )
     {
         ROS_WARN("Cannot find a feasible and optimal solution, somthing wrong with the mosek solver");
-          
+
         if(_has_traj && _is_emerg)
         {
             _traj.action = quadrotor_msgs::PolynomialTrajectory::ACTION_WARN_IMPOSSIBLE;
             _traj_pub.publish(_traj);
             _has_traj = false;
-        } 
+        }
     }
     else
-    {   
+    {
         _seg_num = corridor.size();
         _seg_time.resize(_seg_num);
 
@@ -1012,7 +1144,7 @@ void trajPlanning()
 }
 
 void sortPath(vector<Vector3d> & path_coord, vector<double> & time)
-{   
+{
     vector<Vector3d> path_tmp;
     vector<double> time_tmp;
 
@@ -1030,17 +1162,17 @@ void sortPath(vector<Vector3d> & path_coord, vector<double> & time)
     }
     path_coord = path_tmp;
     time       = time_tmp;
-}   
+}
 
 void timeAllocation(vector<Cube> & corridor, vector<double> time)
-{   
+{
     vector<double> tmp_time;
 
     for(int i  = 0; i < (int)corridor.size() - 1; i++)
-    {   
+    {
         double duration  = (corridor[i].t - corridor[i+1].t);
         tmp_time.push_back(duration);
-    }    
+    }
     double lst_time = corridor.back().t;
     tmp_time.push_back(lst_time);
 
@@ -1059,38 +1191,38 @@ void timeAllocation(vector<Cube> & corridor, vector<double> time)
     {
         double dtxyz;
 
-        Eigen::Vector3d p0   = points[i];    
+        Eigen::Vector3d p0   = points[i];
         Eigen::Vector3d p1   = points[i + 1];
-        Eigen::Vector3d d    = p1 - p0;            
-        Eigen::Vector3d v0(0.0, 0.0, 0.0);        
-        
+        Eigen::Vector3d d    = p1 - p0;
+        Eigen::Vector3d v0(0.0, 0.0, 0.0);
+
         if( i == 0) v0 = initv;
 
-        double D    = d.norm();                   
-        double V0   = v0.dot(d / D);              
-        double aV0  = fabs(V0);                   
+        double D    = d.norm();
+        double V0   = v0.dot(d / D);
+        double aV0  = fabs(V0);
 
-        double acct = (_Vel - V0) / _Acc * ((_Vel > V0)?1:-1); 
+        double acct = (_Vel - V0) / _Acc * ((_Vel > V0)?1:-1);
         double accd = V0 * acct + (_Acc * acct * acct / 2) * ((_Vel > V0)?1:-1);
-        double dcct = _Vel / _Acc;                                              
-        double dccd = _Acc * dcct * dcct / 2;                                   
+        double dcct = _Vel / _Acc;
+        double dccd = _Acc * dcct * dcct / 2;
 
         if (D < aV0 * aV0 / (2 * _Acc))
-        {                 
+        {
             double t1 = (V0 < 0)?2.0 * aV0 / _Acc:0.0;
             double t2 = aV0 / _Acc;
-            dtxyz     = t1 + t2;                 
+            dtxyz     = t1 + t2;
         }
         else if (D < accd + dccd)
         {
             double t1 = (V0 < 0)?2.0 * aV0 / _Acc:0.0;
             double t2 = (-aV0 + sqrt(aV0 * aV0 + _Acc * D - aV0 * aV0 / 2)) / _Acc;
             double t3 = (aV0 + _Acc * t2) / _Acc;
-            dtxyz     = t1 + t2 + t3;    
+            dtxyz     = t1 + t2 + t3;
         }
         else
         {
-            double t1 = acct;                              
+            double t1 = acct;
             double t2 = (D - accd - dccd) / _Vel;
             double t3 = dcct;
             dtxyz     = t1 + t2 + t3;
@@ -1105,7 +1237,7 @@ void timeAllocation(vector<Cube> & corridor, vector<double> time)
 }
 
 void timeAllocation(vector<Cube> & corridor)
-{   
+{
     vector<Vector3d> points;
     points.push_back (_start_pt);
 
@@ -1120,41 +1252,41 @@ void timeAllocation(vector<Cube> & corridor)
     for (int k = 0; k < (int)points.size() - 1; k++)
     {
           double dtxyz;
-          Vector3d p0   = points[k];        
-          Vector3d p1   = points[k + 1];    
-          Vector3d d    = p1 - p0;          
-          Vector3d v0(0.0, 0.0, 0.0);       
-          
+          Vector3d p0   = points[k];
+          Vector3d p1   = points[k + 1];
+          Vector3d d    = p1 - p0;
+          Vector3d v0(0.0, 0.0, 0.0);
+
           if( k == 0) v0 = _start_vel;
 
-          double D    = d.norm();                  
-          double V0   = v0.dot(d / D);             
-          double aV0  = fabs(V0);                  
+          double D    = d.norm();
+          double V0   = v0.dot(d / D);
+          double aV0  = fabs(V0);
 
           double acct = (_Vel - V0) / _Acc * ((_Vel > V0)?1:-1);
           double accd = V0 * acct + (_Acc * acct * acct / 2) * ((_Vel > V0)?1:-1);
-          double dcct = _Vel / _Acc;                                              
-          double dccd = _Acc * dcct * dcct / 2;                                   
+          double dcct = _Vel / _Acc;
+          double dccd = _Acc * dcct * dcct / 2;
 
           if (D < aV0 * aV0 / (2 * _Acc))
-          {               
+          {
             double t1 = (V0 < 0)?2.0 * aV0 / _Acc:0.0;
             double t2 = aV0 / _Acc;
-            dtxyz     = t1 + t2;                 
+            dtxyz     = t1 + t2;
           }
           else if (D < accd + dccd)
           {
             double t1 = (V0 < 0)?2.0 * aV0 / _Acc:0.0;
             double t2 = (-aV0 + sqrt(aV0 * aV0 + _Acc * D - aV0 * aV0 / 2)) / _Acc;
             double t3 = (aV0 + _Acc * t2) / _Acc;
-            dtxyz     = t1 + t2 + t3;    
+            dtxyz     = t1 + t2 + t3;
           }
           else
           {
-            double t1 = acct;                              
+            double t1 = acct;
             double t2 = (D - accd - dccd) / _Vel;
             double t3 = dcct;
-            dtxyz     = t1 + t2 + t3;                                                                  
+            dtxyz     = t1 + t2 + t3;
           }
           corridor[k].t = dtxyz;
       }
@@ -1171,23 +1303,26 @@ int main(int argc, char** argv)
 
     _inf_map_vis_pub   = nh.advertise<sensor_msgs::PointCloud2>("vis_map_inflate", 1);
     _local_map_vis_pub = nh.advertise<sensor_msgs::PointCloud2>("vis_map_local", 1);
-    _traj_vis_pub      = nh.advertise<visualization_msgs::Marker>("trajectory_vis", 1);    
+    _traj_vis_pub      = nh.advertise<visualization_msgs::Marker>("trajectory_vis", 1);
     _corridor_vis_pub  = nh.advertise<visualization_msgs::MarkerArray>("corridor_vis", 1);
     _fm_path_vis_pub   = nh.advertise<visualization_msgs::MarkerArray>("path_vis", 1);
     _grid_path_vis_pub = nh.advertise<visualization_msgs::MarkerArray>("grid_path_vis", 1);
     _nodes_vis_pub     = nh.advertise<visualization_msgs::Marker>("expanded_nodes_vis", 1);
     _checkTraj_vis_pub = nh.advertise<visualization_msgs::Marker>("check_trajectory", 1);
     _stopTraj_vis_pub  = nh.advertise<visualization_msgs::Marker>("stop_trajectory", 1);
+    // _vis_map_pub = nh.advertise<sensor_msgs::PointCloud2>("vis_map", 1);
+    _poscmd_sub = nh.subscribe( "position_cmd",  1, rcvPosCmdCallBack);
 
     _traj_pub = nh.advertise<quadrotor_msgs::PolynomialTrajectory>("trajectory", 10);
+    tf::TransformListener listener;
 
     nh.param("map/margin",     _cloud_margin, 0.25);
     nh.param("map/resolution", _resolution, 0.2);
-    
+
     nh.param("map/x_size",       _x_size, 50.0);
     nh.param("map/y_size",       _y_size, 50.0);
     nh.param("map/z_size",       _z_size, 5.0 );
-    
+
     nh.param("map/x_local_size", _x_local_size, 20.0);
     nh.param("map/y_local_size", _y_local_size, 20.0);
     nh.param("map/z_local_size", _z_local_size, 5.0 );
@@ -1195,7 +1330,7 @@ int main(int argc, char** argv)
     nh.param("planning/init_x",       _init_x,  0.0);
     nh.param("planning/init_y",       _init_y,  0.0);
     nh.param("planning/init_z",       _init_z,  0.0);
-    
+
     nh.param("planning/max_vel",       _MAX_Vel,  1.0);
     nh.param("planning/max_acc",       _MAX_Acc,  1.0);
     nh.param("planning/max_inflate",   _max_inflate_iter, 100);
@@ -1213,9 +1348,11 @@ int main(int argc, char** argv)
     nh.param("vis/vis_traj_width", _vis_traj_width, 0.15);
     nh.param("vis/is_proj_cube",   _is_proj_cube, true);
 
+    nh.param("enable_replanning", _enable_replanning, false);
+
     Bernstein _bernstein;
     if(_bernstein.setParam(3, 12, _minimize_order) == -1)
-        ROS_ERROR(" The trajectory order is set beyond the library's scope, please re-set "); 
+        ROS_ERROR(" The trajectory order is set beyond the library's scope, please re-set ");
 
     _MQM = _bernstein.getMQM()[_traj_order];
     _FM  = _bernstein.getFM()[_traj_order];
@@ -1228,8 +1365,9 @@ int main(int argc, char** argv)
     _pt_max_x = + _x_size / 2.0;
     _pt_min_x = - _x_size / 2.0;
     _pt_max_y = + _y_size / 2.0;
-    _pt_min_y = - _y_size / 2.0; 
+    _pt_min_y = - _y_size / 2.0;
     _pt_max_z = + _z_size;
+    // _pt_max_z = 1.0;
     _pt_min_z = 0.0;
 
     _inv_resolution = 1.0 / _resolution;
@@ -1253,9 +1391,17 @@ int main(int argc, char** argv)
 
     ros::Rate rate(100);
     bool status = ros::ok();
-    while(status) 
+    while(status)
     {
-        ros::spinOnce();           
+/*
+        try{
+           listener.lookupTransform("/world", "/camera_depth_optical_frame", ros::Time(), transf);
+        }
+        catch(tf::TransformException ex){
+           ROS_ERROR("%s", ex.what());
+        }
+  */
+ 	    ros::spinOnce();
         status = ros::ok();
         rate.sleep();
     }
@@ -1279,9 +1425,9 @@ quadrotor_msgs::PolynomialTrajectory getBezierTraj()
 
       int idx = 0;
       for(int i = 0; i < _seg_num; i++ )
-      {    
+      {
           for(int j =0; j < poly_num1d; j++)
-          { 
+          {
               traj.coef_x[idx] = _bezier_coeff(i,                  j);
               traj.coef_y[idx] = _bezier_coeff(i,     poly_num1d + j);
               traj.coef_z[idx] = _bezier_coeff(i, 2 * poly_num1d + j);
@@ -1290,7 +1436,7 @@ quadrotor_msgs::PolynomialTrajectory getBezierTraj()
       }
 
       traj.header.frame_id = "/bernstein";
-      traj.header.stamp = _odom.header.stamp; 
+      traj.header.stamp = _odom.header.stamp;
       _start_time = traj.header.stamp;
 
       traj.time.resize(_seg_num);
@@ -1301,7 +1447,7 @@ quadrotor_msgs::PolynomialTrajectory getBezierTraj()
           traj.time[idx] = _seg_time(idx);
           traj.order[idx] = _traj_order;
       }
-      
+
       traj.start_yaw = 0.0;
       traj.final_yaw = 0.0;
 
@@ -1319,9 +1465,9 @@ Vector3d getPosFromBezier(const MatrixXd & polyCoeff, double t_now, int seg_now 
 
     for(int i = 0; i < 3; i++)
         for(int j = 0; j < ctrl_num1D; j++)
-            ret(i) += _C(j) * ctrl_now(i * ctrl_num1D + j) * pow(t_now, j) * pow((1 - t_now), (_traj_order - j) ); 
+            ret(i) += _C(j) * ctrl_now(i * ctrl_num1D + j) * pow(t_now, j) * pow((1 - t_now), (_traj_order - j) );
 
-    return ret;  
+    return ret;
 }
 
 VectorXd getStateFromBezier(const MatrixXd & polyCoeff, double t_now, int seg_now )
@@ -1332,34 +1478,34 @@ VectorXd getStateFromBezier(const MatrixXd & polyCoeff, double t_now, int seg_no
     int ctrl_num1D = polyCoeff.cols() / 3;
 
     for(int i = 0; i < 3; i++)
-    {   
+    {
         for(int j = 0; j < ctrl_num1D; j++){
-            ret[i] += _C(j) * ctrl_now(i * ctrl_num1D + j) * pow(t_now, j) * pow((1 - t_now), (_traj_order - j) ); 
-          
+            ret[i] += _C(j) * ctrl_now(i * ctrl_num1D + j) * pow(t_now, j) * pow((1 - t_now), (_traj_order - j) );
+
             if(j < ctrl_num1D - 1 )
-                ret[i+3] += _Cv(j) * _traj_order 
+                ret[i+3] += _Cv(j) * _traj_order
                       * ( ctrl_now(i * ctrl_num1D + j + 1) - ctrl_now(i * ctrl_num1D + j))
-                      * pow(t_now, j) * pow((1 - t_now), (_traj_order - j - 1) ); 
-          
+                      * pow(t_now, j) * pow((1 - t_now), (_traj_order - j - 1) );
+
             if(j < ctrl_num1D - 2 )
-                ret[i+6] += _Ca(j) * _traj_order * (_traj_order - 1) 
+                ret[i+6] += _Ca(j) * _traj_order * (_traj_order - 1)
                       * ( ctrl_now(i * ctrl_num1D + j + 2) - 2 * ctrl_now(i * ctrl_num1D + j + 1) + ctrl_now(i * ctrl_num1D + j))
-                      * pow(t_now, j) * pow((1 - t_now), (_traj_order - j - 2) );                         
+                      * pow(t_now, j) * pow((1 - t_now), (_traj_order - j - 2) );
 
             if(j < ctrl_num1D - 3 )
-                ret[i+9] += _Cj(j) * _traj_order * (_traj_order - 1) * (_traj_order - 2) 
+                ret[i+9] += _Cj(j) * _traj_order * (_traj_order - 1) * (_traj_order - 2)
                       * ( ctrl_now(i * ctrl_num1D + j + 3) - 3 * ctrl_now(i * ctrl_num1D + j + 2) + 3 * ctrl_now(i * ctrl_num1D + j + 1) - ctrl_now(i * ctrl_num1D + j))
-                      * pow(t_now, j) * pow((1 - t_now), (_traj_order - j - 3) );                         
+                      * pow(t_now, j) * pow((1 - t_now), (_traj_order - j - 3) );
         }
     }
 
-    return ret;  
+    return ret;
 }
 
-visualization_msgs::MarkerArray path_vis; 
+visualization_msgs::MarkerArray path_vis;
 void visPath(vector<Vector3d> path)
 {
-    for(auto & mk: path_vis.markers) 
+    for(auto & mk: path_vis.markers)
         mk.action = visualization_msgs::Marker::DELETE;
 
     _fm_path_vis_pub.publish(path_vis);
@@ -1386,9 +1532,9 @@ void visPath(vector<Vector3d> path)
     {
         mk.id = idx;
 
-        mk.pose.position.x = path[i](0); 
-        mk.pose.position.y = path[i](1); 
-        mk.pose.position.z = path[i](2);  
+        mk.pose.position.x = path[i](0);
+        mk.pose.position.y = path[i](1);
+        mk.pose.position.z = path[i](2);
 
         mk.scale.x = _resolution;
         mk.scale.y = _resolution;
@@ -1403,10 +1549,10 @@ void visPath(vector<Vector3d> path)
 
 visualization_msgs::MarkerArray cube_vis;
 void visCorridor(vector<Cube> corridor)
-{   
-    for(auto & mk: cube_vis.markers) 
+{
+    for(auto & mk: cube_vis.markers)
         mk.action = visualization_msgs::Marker::DELETE;
-    
+
     _corridor_vis_pub.publish(cube_vis);
 
     cube_vis.markers.clear();
@@ -1430,22 +1576,22 @@ void visCorridor(vector<Cube> corridor)
 
     int idx = 0;
     for(int i = 0; i < int(corridor.size()); i++)
-    {   
+    {
         mk.id = idx;
 
-        mk.pose.position.x = (corridor[i].vertex(0, 0) + corridor[i].vertex(3, 0) ) / 2.0; 
-        mk.pose.position.y = (corridor[i].vertex(0, 1) + corridor[i].vertex(1, 1) ) / 2.0; 
+        mk.pose.position.x = (corridor[i].vertex(0, 0) + corridor[i].vertex(3, 0) ) / 2.0;
+        mk.pose.position.y = (corridor[i].vertex(0, 1) + corridor[i].vertex(1, 1) ) / 2.0;
 
         if(_is_proj_cube)
-            mk.pose.position.z = 0.0; 
+            mk.pose.position.z = 0.0;
         else
-            mk.pose.position.z = (corridor[i].vertex(0, 2) + corridor[i].vertex(4, 2) ) / 2.0; 
+            mk.pose.position.z = (corridor[i].vertex(0, 2) + corridor[i].vertex(4, 2) ) / 2.0;
 
         mk.scale.x = (corridor[i].vertex(0, 0) - corridor[i].vertex(3, 0) );
         mk.scale.y = (corridor[i].vertex(1, 1) - corridor[i].vertex(0, 1) );
 
         if(_is_proj_cube)
-            mk.scale.z = 0.05; 
+            mk.scale.z = 0.05;
         else
             mk.scale.z = (corridor[i].vertex(0, 2) - corridor[i].vertex(4, 2) );
 
@@ -1457,7 +1603,7 @@ void visCorridor(vector<Cube> corridor)
 }
 
 void visBezierTrajectory(MatrixXd polyCoeff, VectorXd time)
-{   
+{
     visualization_msgs::Marker traj_vis;
 
     traj_vis.header.stamp       = ros::Time::now();
@@ -1466,7 +1612,7 @@ void visBezierTrajectory(MatrixXd polyCoeff, VectorXd time)
     traj_vis.ns = "trajectory/trajectory";
     traj_vis.id = 0;
     traj_vis.type = visualization_msgs::Marker::SPHERE_LIST;
-    
+
     traj_vis.action = visualization_msgs::Marker::DELETE;
     _checkTraj_vis_pub.publish(traj_vis);
     _stopTraj_vis_pub.publish(traj_vis);
@@ -1489,7 +1635,7 @@ void visBezierTrajectory(MatrixXd polyCoeff, VectorXd time)
     Vector3d cur, pre;
     cur.setZero();
     pre.setZero();
-    
+
     traj_vis.points.clear();
 
     Vector3d state;
@@ -1513,10 +1659,10 @@ void visBezierTrajectory(MatrixXd polyCoeff, VectorXd time)
     _traj_vis_pub.publish(traj_vis);
 }
 
-visualization_msgs::MarkerArray grid_vis; 
+visualization_msgs::MarkerArray grid_vis;
 void visGridPath( vector<Vector3d> grid_path )
-{   
-    for(auto & mk: grid_vis.markers) 
+{
+    for(auto & mk: grid_vis.markers)
         mk.action = visualization_msgs::Marker::DELETE;
 
     _grid_path_vis_pub.publish(grid_vis);
@@ -1543,9 +1689,9 @@ void visGridPath( vector<Vector3d> grid_path )
     {
         mk.id = idx;
 
-        mk.pose.position.x = grid_path[i](0); 
-        mk.pose.position.y = grid_path[i](1); 
-        mk.pose.position.z = grid_path[i](2);  
+        mk.pose.position.x = grid_path[i](0);
+        mk.pose.position.y = grid_path[i](1);
+        mk.pose.position.z = grid_path[i](2);
 
         mk.scale.x = _resolution;
         mk.scale.y = _resolution;
@@ -1559,8 +1705,8 @@ void visGridPath( vector<Vector3d> grid_path )
 }
 
 void visExpNode( vector<GridNodePtr> nodes )
-{   
-    visualization_msgs::Marker node_vis; 
+{
+    visualization_msgs::Marker node_vis;
     node_vis.header.frame_id = "world";
     node_vis.header.stamp = ros::Time::now();
     node_vis.ns = "b_traj/visited_nodes";

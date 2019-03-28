@@ -4,25 +4,15 @@
 <arg name="map_size_y" default="50.0"/>
 <arg name="map_size_z" default=" 5.0"/>
 
-<arg name="init_x" default="0.0"/>
-<arg name="init_y" default="0.0"/>
+<arg name="init_x" default="-20.0"/>
+<arg name="init_y" default="-20.0"/>
 <arg name="init_z" default="  0.5"/>
 
-  <node pkg="tf2_ros" type = "static_transform_publisher" output = "screen" name = "tf_pub1" args=" 0 0 0 0 0 0 1 /world /odom"/>
-    
-
-<!--  <node pkg  = "tf2_ros" type = "static_transform_publisher" output = "screen" name = "tf_pub2" args=" 0 0 0 -.5 .5004 -.5 .4996 /base_footprint /world"/>
--->
-
-  <node pkg  = "tf2_ros" type = "static_transform_publisher" output = "screen" name = "tf_pub2" args=" 0 0 0 -.5 .5004 -.5 .4996 /base_footprint /camera_rgb_optical_frame"/>
-
-
-    
   <node pkg="bezier_planner" type="b_traj_node" name="b_traj_node" output="screen">
       <remap from="~waypoints"      to="/waypoint_generator/waypoints"/>
       <remap from="~odometry"       to="/odom"/>
-<!--      <remap from="~map"            to="/camera/depth_registered/points"/>--> 
-      <remap from="~map"            to="/octomap_point_cloud_centers"/>
+<!--      <remap from="~map"            to="/generated_map"/> -->
+      <remap from="~map"            to="/octomap_point_cloud_centers"/> 
       <remap from="~command"        to="/position_cmd"/> 
       <param name="optimization/poly_order"  value="8"/> 
       <param name="optimization/min_order"   value="2.5"/> 
@@ -34,15 +24,15 @@
       <param name="map/y_local_size" value="16.0"/>
       <param name="map/z_local_size" value="8.0" />
 
-      <param name="map/margin"       value="0.2" />
+      <param name="map/margin"       value="0.5" />
       <param name="planning/init_x"  value="$(arg init_x)"/>
       <param name="planning/init_y"  value="$(arg init_y)"/>
       <param name="planning/init_z"  value="$(arg init_z)"/>
       <param name="planning/inflate_iter"  value="200"  />
       <param name="planning/step_length"   value="1"    />
       <param name="planning/cube_margin"   value="0.0"  />
-      <param name="planning/max_vel"       value="2.0"  />
-      <param name="planning/max_acc"       value="2.0"  />
+      <param name="planning/max_vel"       value=".5"  />
+      <param name="planning/max_acc"       value="1.0"  />
       <param name="planning/check_horizon" value="10.0" />
       <param name="planning/stop_horizon"  value=" 3.0" />
       <param name="planning/is_limit_vel"  value="true" />
@@ -51,6 +41,8 @@
       <param name="vis/vis_traj_width" value="0.15"/>
       <param name="vis/is_proj_cube"   value="false"/>
   </node>
+
+<!--  
   <node pkg  = "bezier_planner" type = "odom_generator" output = "screen" name = "odom_generator">    
       <remap from = "~odometry"  to = "odom"/>
       <remap from = "~command"   to = "/position_cmd"/>
@@ -58,8 +50,10 @@
       <param name="init_y"  value="$(arg init_y)"/>
       <param name="init_z"  value="$(arg init_z)"/>
   </node>
+-->
 
-<node pkg  = "bezier_planner" type = "b_traj_server" output = "screen" name = "b_traj_server">    
+
+  <node pkg  = "bezier_planner" type = "b_traj_server" output = "screen" name = "b_traj_server">    
       <remap from = "~trajectory"        to = "b_traj_node/trajectory"/>
       <remap from = "~odometry"          to = "/odom"/>
       <remap from = "~position_command"  to = "/position_cmd"/>
@@ -74,7 +68,7 @@
   </node>
 <!--
   <node pkg ="bezier_planner" name ="random_forest_sensing" type ="random_forest_sensing" output = "screen">    
-      <remap from="~odometry"   to="/odom"/>    
+      <remap from="~odometry"   to="/odom/fake_odom"/>    
       <param name="init_state_x"   value="$(arg init_x)"/>
       <param name="init_state_y"   value="$(arg init_y)"/>
       <param name="map/x_size"     value="$(arg map_size_x)" />
@@ -90,7 +84,8 @@
       <param name="sensing/rate"   value="10.0"/>        
   </node>
 -->
-  <node pkg="odom_visualization" name="odom_visualization_ukf_" type="odom_visualization" output="screen">
+  
+<node pkg="odom_visualization" name="odom_visualization_ukf_" type="odom_visualization" output="screen">
       <remap from="~odom" to="/odom"/>
       <param name="color/a" value="0.8"/>    
       <param name="color/r" value="0.0"/>        

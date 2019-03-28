@@ -432,7 +432,7 @@ namespace sdf_tools
             // TODO: Needs special handling if there's no gradient to work with
             const std::vector<double> raw_gradient = GetGradient(x_idx, y_idx, z_idx, true);
             const Eigen::Vector3d gradient = EigenHelpers::StdVectorDoubleToEigenVector3d(raw_gradient);
-            const Eigen::Vector3d direction_to_boundary = (nominal_sdf_distance >= 0.0) ? -gradient : gradient;
+            const Eigen::Vector3d direction_to_boundary = (nominal_sdf_distance >= 0.0) ? -gradient : -gradient;
             const std::pair<Eigen::Vector3d, double> entry_surface_information = GetPrimaryEntrySurfaceVector(direction_to_boundary, cell_center_to_location_vector);
             const Eigen::Vector3d& entry_surface_vector = entry_surface_information.first;
             const double minimum_distance_magnitude = entry_surface_information.second;

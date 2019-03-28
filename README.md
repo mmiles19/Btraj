@@ -61,7 +61,7 @@ We use **mosek** for solving quadratic program(QP). To use mosek, you should app
 ## 5.Usage
 If you have done all above, you can try the simple simulation.
 ```
-  roslaunch bezier_planer simulation.launch
+  roslaunch bezier_planner simulation.launch
 ```
 In rviz, click 'Panels -> tools -> +' and select the plugin 'Goal3DTool'. If you have successfully compiled all packages from [plan_utils](https://github.com/HKUST-Aerial-Robotics/plan_utils), now you can see *3D Nav Goal* in the tools panel.
 
