@@ -148,8 +148,8 @@ void rcvOdometryCallbck(const nav_msgs::Odometry odom)
 
     _start_pt(0)  = _odom.pose.pose.position.x;
     _start_pt(1)  = _odom.pose.pose.position.y;
-    // _start_pt(2)  = _odom.pose.pose.position.z;
-    _start_pt(2) = 0.75;
+    _start_pt(2)  = _odom.pose.pose.position.z+0.2;
+    // _start_pt(2) = 0.75;
 
     _start_vel(0) = _odom.twist.twist.linear.x;
     _start_vel(1) = _odom.twist.twist.linear.y;
@@ -179,14 +179,15 @@ void rcvOdometryCallbck(const nav_msgs::Odometry odom)
 
 void rcvWaypointsCallback(const nav_msgs::Path & wp)
 {
-    if(wp.poses[0].pose.position.z < 0.0) // NEED TO REPLACE WITH CONSIDERATION FOR NONFLAT GROUND
-        return;
+    // if(wp.poses[0].pose.position.z < 0.0) // NEED TO REPLACE WITH CONSIDERATION FOR NONFLAT GROUND
+    //     return;
 
     _is_init = false;
     _end_pt(0) = wp.poses[0].pose.position.x;
     _end_pt(1) = wp.poses[0].pose.position.y;
     // _end_pt(2) = wp.poses[0].pose.position.z;
-    _end_pt(2) = 0.5;
+    // _end_pt(2) = _odom.pose.pose.position.z;
+		_end_pt(2) = _start_pt(2);
 
     _has_target = true;
     _is_emerg   = true;
@@ -234,19 +235,59 @@ void rcvPointCloudCallBack(const sensor_msgs::PointCloud2 & pointcloud_map)
     vector<pcl::PointXYZ> inflatePts(20);
     pcl::PointCloud<pcl::PointXYZ> cloud_inflation;
     pcl::PointCloud<pcl::PointXYZ> cloud_local;
-    unsigned int xroofrng = 5;
-    unsigned int yroofrng = 5;
-    zroof = 1.1;
-    for (xroof = _start_pt(0)-xroofrng;xroof <= _start_pt(0)+xroofrng;xroof +=0.1)
-    {
-    	for (yroof = _start_pt(1)-yroofrng;yroof <= _start_pt(1)+yroofrng;yroof +=0.1)
-    	{
-      	roofpt.x = xroof;
-      	roofpt.y = yroof;
-      	roofpt.z = zroof;
-      	cloud.push_back(roofpt);
-  	  }
-    }
+
+		// just a ceiling
+   	// unsigned int xroofrng = 10;
+  	// unsigned int yroofrng = 10;
+		// unsigned int zroofrng = 2;
+    // zroof = _odom.pose.pose.position.z + zroofrng/2.0;
+		// ROS_INFO_THROTTLE(2,"[btraj] odom z: %f, zroof: %f",_odom.pose.pose.position.z,zroof);
+    // for (xroof = _odom.pose.pose.position.x-xroofrng;xroof <= _start_pt(0)+xroofrng;xroof +=0.1)
+    // {
+    // 	for (yroof = _odom.pose.pose.position.y-yroofrng;yroof <= _start_pt(1)+yroofrng;yroof +=0.1)
+    // 	{
+    //   	roofpt.x = xroof;
+    //   	roofpt.y = yroof;
+    //   	roofpt.z = zroof;
+    //   	cloud.push_back(roofpt);
+  	//   }
+    // }
+
+		// cage
+		// ROS_INFO("[btraj] Building cage...");
+   	double xroofrng = 20;
+  	double yroofrng = 20;
+		double zroofrng = 2;
+		double xmin = _odom.pose.pose.position.x-xroofrng/2;
+		double xmax = _odom.pose.pose.position.x+xroofrng/2;
+		double ymin = _odom.pose.pose.position.y-yroofrng/2;
+		double ymax = _odom.pose.pose.position.y+yroofrng/2;
+		double zmin = _odom.pose.pose.position.z-zroofrng/2;
+		double zmax = _odom.pose.pose.position.z+zroofrng/2;
+		// ROS_INFO("[btraj] Cage dims: %f - %f, %f - %f,  %f - %f", xmin,xmax,ymin,ymax,zmin,zmax);
+		for (zroof = zmin; zroof <= zmax; zroof += _resolution)
+		{
+			for (xroof = xmin; xroof <= xmax; xroof += _resolution)
+	    {
+	    	for (yroof = ymin; yroof <= ymax; yroof += _resolution)
+	    	{
+					if (abs(xroof-xmin)<2*_resolution ||
+							abs(xroof-xmax)<2*_resolution ||
+							abs(yroof-ymin)<2*_resolution ||
+							abs(yroof-ymax)<2*_resolution ||
+							abs(zroof-zmin)<2*_resolution ||
+							abs(zroof-zmax)<2*_resolution)
+					{
+						// ROS_INFO("[btraj] ADDING ROOF PT: %f, %f, %f", xroof,yroof,zroof);
+		      	roofpt.x = xroof;
+		      	roofpt.y = yroof;
+		      	roofpt.z = zroof;
+		      	cloud.push_back(roofpt);
+					}
+	  	  }
+	    }
+		}
+		// ROS_INFO("[btraj] Done building cage...");
 
 
 /*
