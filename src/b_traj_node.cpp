@@ -140,16 +140,16 @@ void rcvPosCmdCallBack(const quadrotor_msgs::PositionCommand cmd)
 
 void rcvOdometryCallbck(const nav_msgs::Odometry odom)
 {
-    if (odom.header.frame_id != "world")
-        return ;
+    //if (odom.header.frame_id != "map")
+    //    return ;
 
     _odom = odom;
     _has_odom = true;
 
     _start_pt(0)  = _odom.pose.pose.position.x;
     _start_pt(1)  = _odom.pose.pose.position.y;
-    _start_pt(2)  = _odom.pose.pose.position.z+0.2;
-    // _start_pt(2) = 0.75;
+    // _start_pt(2)  = _odom.pose.pose.position.z;
+    _start_pt(2) = 0.75;
 
     _start_vel(0) = _odom.twist.twist.linear.x;
     _start_vel(1) = _odom.twist.twist.linear.y;
@@ -187,6 +187,7 @@ void rcvWaypointsCallback(const nav_msgs::Path & wp)
     _end_pt(1) = wp.poses[0].pose.position.y;
     // _end_pt(2) = wp.poses[0].pose.position.z;
     // _end_pt(2) = _odom.pose.pose.position.z;
+		// _end_pt(2) = _start_pt(2)+0.3;
 		_end_pt(2) = _start_pt(2);
 
     _has_target = true;
