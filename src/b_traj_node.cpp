@@ -149,7 +149,7 @@ void rcvOdometryCallbck(const nav_msgs::Odometry odom)
     _start_pt(0)  = _odom.pose.pose.position.x;
     _start_pt(1)  = _odom.pose.pose.position.y;
     // _start_pt(2)  = _odom.pose.pose.position.z;
-    _start_pt(2) = .75;
+    _start_pt(2) = 0.75;
 
     _start_vel(0) = _odom.twist.twist.linear.x;
     _start_vel(1) = _odom.twist.twist.linear.y;
