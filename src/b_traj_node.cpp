@@ -149,7 +149,8 @@ void rcvOdometryCallbck(const nav_msgs::Odometry odom)
     _start_pt(0)  = _odom.pose.pose.position.x;
     _start_pt(1)  = _odom.pose.pose.position.y;
     // _start_pt(2)  = _odom.pose.pose.position.z;
-    _start_pt(2) = 0.75;
+    // _start_pt(2) = 0.75;
+		_start_pt(2) = .5;
 
     _start_vel(0) = _odom.twist.twist.linear.x;
     _start_vel(1) = _odom.twist.twist.linear.y;
@@ -258,7 +259,7 @@ void rcvPointCloudCallBack(const sensor_msgs::PointCloud2 & pointcloud_map)
 		// ROS_INFO("[btraj] Building cage...");
    	double xroofrng = 20;
   	double yroofrng = 20;
-		double zroofrng = 3;
+		double zroofrng = 4;
 		double xmin = _odom.pose.pose.position.x-xroofrng/2;
 		double xmax = _odom.pose.pose.position.x+xroofrng/2;
 		double ymin = _odom.pose.pose.position.y-yroofrng/2;
